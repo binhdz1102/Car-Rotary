@@ -1,20 +1,26 @@
 """
 AAOS Rotary Control Panel
 
-A compact Tkinter dashboard that sends ADB commands to simulate a car rotary controller:
+A compact always-on-top Tkinter dashboard that sends ADB commands to simulate
+an Android Automotive OS rotary controller.
+
+Features:
 - Nudge left, right, up, down
 - Rotate counterclockwise / clockwise
 - Center button
+- Optional Always on top mode
+- Vertically resizable window
 
 Requirements:
 - Python 3 with tkinter
-- adb available in PATH, or set full adb path in the UI
+- adb available in PATH, or set the full adb path in the UI
 - An Android Automotive OS emulator/device connected and authorized
 """
 
 from __future__ import annotations
 
 import subprocess
+import sys
 import threading
 import time
 from pathlib import Path
@@ -23,7 +29,7 @@ from tkinter import ttk
 
 APP_DIR = Path(__file__).resolve().parent
 
-# AAOS car_service commands
+# AAOS car_service commands.
 COMMANDS = {
     "rotate_left": ["shell", "cmd", "car_service", "inject-rotary"],
     "rotate_right": ["shell", "cmd", "car_service", "inject-rotary", "-c", "true"],
@@ -69,19 +75,23 @@ class RotaryControlPanel(tk.Tk):
     def __init__(self) -> None:
         super().__init__()
         self.title("AAOS Rotary Panel")
-        self.geometry("560x500")
-        self.minsize(520, 460)
-        self.resizable(True, True)
+        self.geometry("500x430")
+        self.minsize(500, 330)
+        # Allow changing only the vertical size. Width stays compact.
+        self.resizable(False, True)
 
         self.icons: dict[str, tk.PhotoImage] = {}
         self.adb_path_var = tk.StringVar(value="adb")
         self.serial_var = tk.StringVar(value="")
         self.repeat_var = tk.IntVar(value=1)
         self.delay_ms_var = tk.IntVar(value=80)
+        self.always_on_top_var = tk.BooleanVar(value=True)
         self.last_command_var = tk.StringVar(value="Ready")
 
         self._configure_style()
         self._build_ui()
+        self._apply_window_mode()
+        self.bind("<Escape>", lambda _: self.destroy())
 
     def _configure_style(self) -> None:
         self.configure(bg="#151515")
@@ -90,19 +100,26 @@ class RotaryControlPanel(tk.Tk):
             style.theme_use("clam")
         except tk.TclError:
             pass
+
         style.configure("TFrame", background="#151515")
         style.configure("Panel.TFrame", background="#202020")
-        style.configure("TLabel", background="#151515", foreground="#eeeeee", font=("Segoe UI", 9))
-        style.configure("Title.TLabel", background="#151515", foreground="#ffffff", font=("Segoe UI", 15, "bold"))
+        style.configure("TLabel", background="#151515", foreground="#eeeeee", font=("Segoe UI", 8))
+        style.configure("Title.TLabel", background="#151515", foreground="#ffffff", font=("Segoe UI", 13, "bold"))
         style.configure("Hint.TLabel", background="#151515", foreground="#bbbbbb", font=("Segoe UI", 8))
         style.configure("Panel.TLabel", background="#202020", foreground="#eeeeee", font=("Segoe UI", 8))
-        style.configure("TButton", font=("Segoe UI", 9, "bold"), padding=5)
-        style.configure("Icon.TButton", padding=4)
-        style.configure("TEntry", padding=4)
-        style.configure("TSpinbox", padding=4)
+        style.configure("Panel.TCheckbutton", background="#202020", foreground="#eeeeee", font=("Segoe UI", 8))
+        style.map(
+            "Panel.TCheckbutton",
+            background=[("active", "#202020")],
+            foreground=[("active", "#ffffff")],
+        )
+        style.configure("TButton", font=("Segoe UI", 8, "bold"), padding=4)
+        style.configure("Icon.TButton", padding=3)
+        style.configure("TEntry", padding=3)
+        style.configure("TSpinbox", padding=3)
 
     def _build_ui(self) -> None:
-        root = ttk.Frame(self, padding=12)
+        root = ttk.Frame(self, padding=10)
         root.pack(fill="both", expand=True)
 
         title = ttk.Label(root, text="AAOS Rotary Panel", style="Title.TLabel")
@@ -113,40 +130,48 @@ class RotaryControlPanel(tk.Tk):
             text="ADB simulator for AAOS rotary input.",
             style="Hint.TLabel",
         )
-        hint.pack(anchor="w", pady=(2, 8))
+        hint.pack(anchor="w", pady=(1, 7))
 
-        config = ttk.Frame(root, style="Panel.TFrame", padding=8)
-        config.pack(fill="x", pady=(0, 10))
+        config = ttk.Frame(root, style="Panel.TFrame", padding=7)
+        config.pack(fill="x", pady=(0, 8))
 
-        ttk.Label(config, text="ADB:", style="Panel.TLabel").grid(row=0, column=0, sticky="w", padx=(0, 5), pady=3)
-        ttk.Entry(config, textvariable=self.adb_path_var, width=18).grid(row=0, column=1, sticky="ew", padx=(0, 8), pady=3)
+        ttk.Label(config, text="ADB", style="Panel.TLabel").grid(row=0, column=0, sticky="w", padx=(0, 5), pady=2)
+        ttk.Entry(config, textvariable=self.adb_path_var, width=18).grid(row=0, column=1, sticky="ew", padx=(0, 8), pady=2)
 
-        ttk.Label(config, text="Serial:", style="Panel.TLabel").grid(row=0, column=2, sticky="w", padx=(0, 5), pady=3)
-        ttk.Entry(config, textvariable=self.serial_var, width=18).grid(row=0, column=3, sticky="ew", padx=(0, 8), pady=3)
+        ttk.Label(config, text="Serial", style="Panel.TLabel").grid(row=0, column=2, sticky="w", padx=(0, 5), pady=2)
+        ttk.Entry(config, textvariable=self.serial_var, width=18).grid(row=0, column=3, sticky="ew", padx=(0, 8), pady=2)
 
-        ttk.Button(config, text="Check devices", command=self.check_devices).grid(row=0, column=4, sticky="ew", pady=3)
+        ttk.Button(config, text="Check devices", command=self.check_devices).grid(row=0, column=4, sticky="ew", pady=2)
 
-        ttk.Label(config, text="Repeat:", style="Panel.TLabel").grid(row=1, column=0, sticky="w", padx=(0, 5), pady=3)
-        ttk.Spinbox(config, from_=1, to=50, textvariable=self.repeat_var, width=6).grid(row=1, column=1, sticky="w", pady=3)
+        ttk.Label(config, text="Repeat", style="Panel.TLabel").grid(row=1, column=0, sticky="w", padx=(0, 5), pady=2)
+        ttk.Spinbox(config, from_=1, to=100, textvariable=self.repeat_var, width=5).grid(row=1, column=1, sticky="w", pady=2)
 
-        ttk.Label(config, text="Delay ms:", style="Panel.TLabel").grid(row=1, column=2, sticky="w", padx=(0, 5), pady=3)
-        ttk.Spinbox(config, from_=0, to=1000, increment=10, textvariable=self.delay_ms_var, width=6).grid(row=1, column=3, sticky="w", pady=3)
+        ttk.Label(config, text="Delay ms", style="Panel.TLabel").grid(row=1, column=2, sticky="w", padx=(0, 5), pady=2)
+        ttk.Spinbox(config, from_=0, to=2000, increment=10, textvariable=self.delay_ms_var, width=5).grid(row=1, column=3, sticky="w", pady=2)
+
+        ttk.Checkbutton(
+            config,
+            text="Always on top",
+            variable=self.always_on_top_var,
+            command=self._apply_window_mode,
+            style="Panel.TCheckbutton",
+        ).grid(row=1, column=4, sticky="w", pady=2)
 
         config.columnconfigure(1, weight=1)
         config.columnconfigure(3, weight=1)
 
-        control = ttk.Frame(root, style="Panel.TFrame", padding=10)
-        control.pack(anchor="center", pady=(0, 10))
+        control = ttk.Frame(root, style="Panel.TFrame", padding=8)
+        control.pack(anchor="center", pady=(0, 8))
 
         for c in range(5):
-            control.columnconfigure(c, minsize=72)
+            control.columnconfigure(c, minsize=58)
         for r in range(3):
-            control.rowconfigure(r, minsize=72)
+            control.rowconfigure(r, minsize=58)
 
         # Compact physical layout:
-        #   up
-        # rotate-left, tilt-left, enter, tilt-right, rotate-right
-        #   down
+        #               tilt up
+        # rotate left | tilt left | enter | tilt right | rotate right
+        #              tilt down
         self._add_icon_button(control, "tilt_up", 0, 2)
         self._add_icon_button(control, "rotate_left", 1, 0)
         self._add_icon_button(control, "tilt_left", 1, 1)
@@ -155,15 +180,56 @@ class RotaryControlPanel(tk.Tk):
         self._add_icon_button(control, "rotate_right", 1, 4)
         self._add_icon_button(control, "tilt_down", 2, 2)
 
-        command_box = ttk.Frame(root, style="Panel.TFrame", padding=8)
+        command_box = ttk.Frame(root, style="Panel.TFrame", padding=7)
         command_box.pack(fill="both", expand=True)
 
-        ttk.Label(command_box, text="Last command:", style="Panel.TLabel").pack(anchor="w")
-        ttk.Label(command_box, textvariable=self.last_command_var, background="#202020", foreground="#9be38f", font=("Consolas", 8)).pack(anchor="w", pady=(2, 5))
+        ttk.Label(command_box, text="Last command", style="Panel.TLabel").pack(anchor="w")
+        ttk.Label(
+            command_box,
+            textvariable=self.last_command_var,
+            background="#202020",
+            foreground="#9be38f",
+            font=("Consolas", 8),
+        ).pack(anchor="w", pady=(1, 4))
 
-        self.output = tk.Text(command_box, height=4, wrap="word", bg="#111111", fg="#eeeeee", insertbackground="#eeeeee", font=("Consolas", 8))
+        self.output = tk.Text(
+            command_box,
+            height=4,
+            wrap="word",
+            bg="#111111",
+            fg="#eeeeee",
+            insertbackground="#eeeeee",
+            font=("Consolas", 8),
+            relief="flat",
+        )
         self.output.pack(fill="both", expand=True)
+
+        bottom_bar = ttk.Frame(root, style="TFrame")
+        bottom_bar.pack(fill="x", pady=(5, 0))
+        ttk.Label(
+            bottom_bar,
+            text="Drag the bottom edge to resize height.",
+            style="Hint.TLabel",
+        ).pack(side="left")
+        ttk.Sizegrip(bottom_bar).pack(side="right", anchor="se")
+
         self._append_output("Ready. Connect an AAOS emulator/device, then click a button.\n")
+
+    def _apply_window_mode(self) -> None:
+        is_topmost = bool(self.always_on_top_var.get())
+
+        # Keep the panel floating above Android Studio / Emulator when enabled.
+        self.attributes("-topmost", is_topmost)
+
+        # Windows-only: make the panel look like a small floating tool window.
+        if sys.platform.startswith("win"):
+            try:
+                self.attributes("-toolwindow", True)
+            except tk.TclError:
+                pass
+
+        if is_topmost:
+            self.lift()
 
     def _load_icon(self, key: str) -> tk.PhotoImage | None:
         icon_path = APP_DIR / ICONS[key]
@@ -171,8 +237,7 @@ class RotaryControlPanel(tk.Tk):
             return None
         image = tk.PhotoImage(file=str(icon_path))
         max_dim = max(image.width(), image.height())
-        # Smaller icons keep the panel compact inside Android Studio.
-        factor = max(1, round(max_dim / 48))
+        factor = max(1, round(max_dim / 40))
         if factor > 1:
             image = image.subsample(factor, factor)
         self.icons[key] = image
@@ -188,8 +253,8 @@ class RotaryControlPanel(tk.Tk):
             style="Icon.TButton",
             command=lambda k=key: self.send_rotary_command(k),
         )
-        button.grid(row=row, column=column, sticky="nsew", padx=5, pady=5, ipadx=2, ipady=2)
-        button.configure(width=6)
+        button.grid(row=row, column=column, sticky="nsew", padx=4, pady=4, ipadx=1, ipady=1)
+        button.configure(width=4)
         self._add_tooltip(button, TOOLTIPS[key])
 
     def _add_tooltip(self, widget: tk.Widget, text: str) -> None:
@@ -198,11 +263,15 @@ class RotaryControlPanel(tk.Tk):
         def show(_: tk.Event) -> None:
             if tooltip["window"] is not None:
                 return
-            x = widget.winfo_rootx() + 12
-            y = widget.winfo_rooty() + widget.winfo_height() + 4
+            x = widget.winfo_rootx() + 10
+            y = widget.winfo_rooty() + widget.winfo_height() + 3
             window = tk.Toplevel(widget)
             window.wm_overrideredirect(True)
             window.wm_geometry(f"+{x}+{y}")
+            try:
+                window.attributes("-topmost", True)
+            except tk.TclError:
+                pass
             label = tk.Label(window, text=text, bg="#303030", fg="#eeeeee", padx=6, pady=3, font=("Segoe UI", 8))
             label.pack()
             tooltip["window"] = window
