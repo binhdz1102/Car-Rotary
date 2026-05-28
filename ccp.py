@@ -8,8 +8,11 @@ Features:
 - Nudge left, right, up, down
 - Rotate counterclockwise / clockwise
 - Center button
+- Home and Back buttons
+- Device screenshot capture to the computer Downloads folder using adb pull
 - Optional Always on top mode
 - Vertically resizable window
+- Windows console hiding support
 
 Requirements:
 - Python 3 with tkinter
@@ -19,17 +22,19 @@ Requirements:
 
 from __future__ import annotations
 
+import ctypes
 import subprocess
 import sys
 import threading
 import time
+from datetime import datetime
 from pathlib import Path
 import tkinter as tk
 from tkinter import ttk
 
 APP_DIR = Path(__file__).resolve().parent
 
-# AAOS car_service commands.
+# AAOS car_service commands and Android key events.
 COMMANDS = {
     "rotate_left": ["shell", "cmd", "car_service", "inject-rotary"],
     "rotate_right": ["shell", "cmd", "car_service", "inject-rotary", "-c", "true"],
@@ -38,6 +43,8 @@ COMMANDS = {
     "tilt_left": ["shell", "cmd", "car_service", "inject-key", "282"],
     "tilt_right": ["shell", "cmd", "car_service", "inject-key", "283"],
     "enter": ["shell", "cmd", "car_service", "inject-key", "23"],
+    "home": ["shell", "input", "keyevent", "3"],
+    "back": ["shell", "input", "keyevent", "4"],
 }
 
 ICONS = {
@@ -48,6 +55,9 @@ ICONS = {
     "tilt_left": "left_arrow.png",
     "tilt_right": "right_arrow.png",
     "enter": "enter.png",
+    "home": "home_button.png",
+    "back": "back_button.png",
+    "screenshot": "screen_shot.png",
 }
 
 ACTION_NAMES = {
@@ -58,6 +68,9 @@ ACTION_NAMES = {
     "tilt_left": "Tilt left",
     "tilt_right": "Tilt right",
     "enter": "Enter",
+    "home": "Home",
+    "back": "Back",
+    "screenshot": "Screenshot",
 }
 
 TOOLTIPS = {
@@ -68,15 +81,49 @@ TOOLTIPS = {
     "tilt_left": "Nudge left",
     "tilt_right": "Nudge right",
     "enter": "Center button",
+    "home": "Home button",
+    "back": "Back button",
+    "screenshot": "Capture device screenshot to Downloads",
 }
+
+
+def hide_console_window() -> None:
+    """Hide the console window on Windows when the script is launched with python.exe."""
+    if not sys.platform.startswith("win"):
+        return
+    try:
+        console_window = ctypes.windll.kernel32.GetConsoleWindow()
+        if console_window:
+            ctypes.windll.user32.ShowWindow(console_window, 0)
+    except Exception:
+        # The GUI should still open even if the console cannot be hidden.
+        pass
+
+
+def subprocess_no_window_options() -> dict[str, object]:
+    """Return subprocess options that prevent child console windows on Windows."""
+    if not sys.platform.startswith("win"):
+        return {}
+
+    options: dict[str, object] = {}
+    startupinfo = subprocess.STARTUPINFO()
+    startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+    startupinfo.wShowWindow = subprocess.SW_HIDE
+    options["startupinfo"] = startupinfo
+
+    create_no_window = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    if create_no_window:
+        options["creationflags"] = create_no_window
+
+    return options
 
 
 class RotaryControlPanel(tk.Tk):
     def __init__(self) -> None:
         super().__init__()
         self.title("AAOS Rotary Panel")
-        self.geometry("500x430")
-        self.minsize(500, 330)
+        self.geometry("500x455")
+        self.minsize(500, 360)
         # Allow changing only the vertical size. Width stays compact.
         self.resizable(False, True)
 
@@ -164,21 +211,29 @@ class RotaryControlPanel(tk.Tk):
         control.pack(anchor="center", pady=(0, 8))
 
         for c in range(5):
-            control.columnconfigure(c, minsize=58)
+            control.columnconfigure(c, minsize=50)
         for r in range(3):
-            control.rowconfigure(r, minsize=58)
+            control.rowconfigure(r, minsize=50)
 
         # Compact physical layout:
-        #               tilt up
+        #                 tilt up | screenshot
         # rotate left | tilt left | enter | tilt right | rotate right
-        #              tilt down
+        # back                  | tilt down | home
+        #
+        # This keeps the extra buttons close to the directional cluster:
+        # - screenshot: right of Up and above Right
+        # - back: below-left of Left
+        # - home: right of Down and below Right
         self._add_icon_button(control, "tilt_up", 0, 2)
+        self._add_icon_button(control, "screenshot", 0, 3)
         self._add_icon_button(control, "rotate_left", 1, 0)
         self._add_icon_button(control, "tilt_left", 1, 1)
         self._add_icon_button(control, "enter", 1, 2)
         self._add_icon_button(control, "tilt_right", 1, 3)
         self._add_icon_button(control, "rotate_right", 1, 4)
+        self._add_icon_button(control, "back", 2, 1)
         self._add_icon_button(control, "tilt_down", 2, 2)
+        self._add_icon_button(control, "home", 2, 3)
 
         command_box = ttk.Frame(root, style="Panel.TFrame", padding=7)
         command_box.pack(fill="both", expand=True)
@@ -237,7 +292,7 @@ class RotaryControlPanel(tk.Tk):
             return None
         image = tk.PhotoImage(file=str(icon_path))
         max_dim = max(image.width(), image.height())
-        factor = max(1, round(max_dim / 40))
+        factor = max(1, round(max_dim / 36))
         if factor > 1:
             image = image.subsample(factor, factor)
         self.icons[key] = image
@@ -245,15 +300,21 @@ class RotaryControlPanel(tk.Tk):
 
     def _add_icon_button(self, parent: ttk.Frame, key: str, row: int, column: int) -> None:
         icon = self._load_icon(key)
+
+        if key == "screenshot":
+            command = self.take_screenshot
+        else:
+            command = lambda k=key: self.send_rotary_command(k)
+
         button = ttk.Button(
             parent,
             text="" if icon else ACTION_NAMES[key],
             image=icon,
             compound="center" if icon else "none",
             style="Icon.TButton",
-            command=lambda k=key: self.send_rotary_command(k),
+            command=command,
         )
-        button.grid(row=row, column=column, sticky="nsew", padx=4, pady=4, ipadx=1, ipady=1)
+        button.grid(row=row, column=column, sticky="nsew", padx=3, pady=3, ipadx=0, ipady=0)
         button.configure(width=4)
         self._add_tooltip(button, TOOLTIPS[key])
 
@@ -303,6 +364,90 @@ class RotaryControlPanel(tk.Tk):
         cmd = self._adb_base() + COMMANDS[key]
         self._run_command_async(cmd, ACTION_NAMES[key], repeat=repeat, delay_ms=delay_ms)
 
+    def take_screenshot(self) -> None:
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        filename = f"aaos_screenshot_{timestamp}.png"
+        downloads_dir = Path.home() / "Downloads"
+        screenshot_path = downloads_dir / filename
+        remote_path = f"/sdcard/Download/{filename}"
+
+        self.last_command_var.set(f"screencap -> adb pull -> {screenshot_path}")
+        self._append_output(
+            "\n▶ Screenshot\n"
+            f"$ {' '.join(self._adb_base() + ['shell', 'screencap', '-p', remote_path])}\n"
+            f"$ {' '.join(self._adb_base() + ['pull', remote_path, str(screenshot_path)])}\n"
+        )
+
+        thread = threading.Thread(
+            target=self._screenshot_worker,
+            args=(remote_path, screenshot_path),
+            daemon=True,
+        )
+        thread.start()
+
+    def _run_process_for_screenshot(self, cmd: list[str], timeout: int = 20) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            check=False,
+            **subprocess_no_window_options(),
+        )
+
+    @staticmethod
+    def _is_valid_png(path: Path) -> bool:
+        try:
+            if not path.exists() or path.stat().st_size < 8:
+                return False
+            with path.open("rb") as file:
+                return file.read(8) == b"\x89PNG\r\n\x1a\n"
+        except OSError:
+            return False
+
+    def _screenshot_worker(self, remote_path: str, screenshot_path: Path) -> None:
+        try:
+            screenshot_path.parent.mkdir(parents=True, exist_ok=True)
+            adb = self._adb_base()
+
+            # More reliable than streaming PNG bytes through stdout on Windows.
+            # First write a real PNG file on the device, then pull that file to Downloads.
+            capture = self._run_process_for_screenshot(adb + ["shell", "screencap", "-p", remote_path])
+            if capture.returncode != 0:
+                error = capture.stderr.strip() or capture.stdout.strip()
+                message = error or f"Screenshot failed. Exit code: {capture.returncode}"
+                self.after(0, lambda: self._append_output(message + "\n"))
+                return
+
+            pull = self._run_process_for_screenshot(adb + ["pull", remote_path, str(screenshot_path)])
+
+            # Clean up the temporary screenshot on the Android device.
+            self._run_process_for_screenshot(adb + ["shell", "rm", "-f", remote_path], timeout=8)
+
+            if pull.returncode != 0:
+                error = pull.stderr.strip() or pull.stdout.strip()
+                try:
+                    screenshot_path.unlink(missing_ok=True)
+                except OSError:
+                    pass
+                message = error or f"adb pull failed. Exit code: {pull.returncode}"
+            elif self._is_valid_png(screenshot_path):
+                message = f"Saved screenshot to: {screenshot_path}"
+            else:
+                try:
+                    screenshot_path.unlink(missing_ok=True)
+                except OSError:
+                    pass
+                message = "Screenshot failed. The pulled file was not a valid PNG."
+        except FileNotFoundError:
+            message = "adb not found. Set the full adb path or add adb to PATH."
+        except subprocess.TimeoutExpired:
+            message = "Screenshot timeout. Check the emulator/device and authorization state."
+        except OSError as error:
+            message = f"Screenshot failed: {error}"
+
+        self.after(0, lambda: self._append_output(message + "\n"))
+
     def _run_command_async(self, cmd: list[str], label: str, repeat: int, delay_ms: int) -> None:
         self.last_command_var.set(" ".join(cmd))
         self._append_output(f"\n▶ {label}\n$ {' '.join(cmd)}\n")
@@ -319,6 +464,7 @@ class RotaryControlPanel(tk.Tk):
                     text=True,
                     timeout=12,
                     check=False,
+                    **subprocess_no_window_options(),
                 )
                 if completed.stdout.strip():
                     outputs.append(completed.stdout.strip())
@@ -346,6 +492,11 @@ class RotaryControlPanel(tk.Tk):
         self.output.see("end")
 
 
-if __name__ == "__main__":
+def main() -> None:
+    hide_console_window()
     app = RotaryControlPanel()
     app.mainloop()
+
+
+if __name__ == "__main__":
+    main()
