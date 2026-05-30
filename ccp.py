@@ -10,6 +10,7 @@ Features:
 - Center button
 - Home and Back buttons
 - Device screenshot capture to the computer Downloads folder using adb pull
+- Custom command runner loaded from comands.txt / commands.txt
 - Optional Always on top mode
 - Vertically resizable window
 - Windows console hiding support
@@ -23,6 +24,7 @@ Requirements:
 from __future__ import annotations
 
 import ctypes
+import shlex
 import subprocess
 import sys
 import threading
@@ -33,6 +35,8 @@ import tkinter as tk
 from tkinter import ttk
 
 APP_DIR = Path(__file__).resolve().parent
+CUSTOM_COMMAND_PRIMARY_FILE = "comands.txt"  # Kept as requested by the user.
+CUSTOM_COMMAND_FALLBACK_FILE = "commands.txt"
 
 # AAOS car_service commands and Android key events.
 COMMANDS = {
@@ -87,6 +91,12 @@ TOOLTIPS = {
 }
 
 
+SAMPLE_COMMANDS_TEXT = """adb shell dumpsys window
+adb shell dumpsys meminfo
+adb devices
+"""
+
+
 def hide_console_window() -> None:
     """Hide the console window on Windows when the script is launched with python.exe."""
     if not sys.platform.startswith("win"):
@@ -122,8 +132,8 @@ class RotaryControlPanel(tk.Tk):
     def __init__(self) -> None:
         super().__init__()
         self.title("AAOS Rotary Panel")
-        self.geometry("500x455")
-        self.minsize(500, 360)
+        self.geometry("500x520")
+        self.minsize(500, 420)
         # Allow changing only the vertical size. Width stays compact.
         self.resizable(False, True)
 
@@ -134,9 +144,13 @@ class RotaryControlPanel(tk.Tk):
         self.delay_ms_var = tk.IntVar(value=80)
         self.always_on_top_var = tk.BooleanVar(value=True)
         self.last_command_var = tk.StringVar(value="Ready")
+        self.custom_command_var = tk.StringVar(value="")
+        self.custom_commands: list[str] = []
+        self.command_file_path = self._resolve_command_file_path()
 
         self._configure_style()
         self._build_ui()
+        self._load_custom_commands(show_log=False)
         self._apply_window_mode()
         self.bind("<Escape>", lambda _: self.destroy())
 
@@ -164,6 +178,7 @@ class RotaryControlPanel(tk.Tk):
         style.configure("Icon.TButton", padding=3)
         style.configure("TEntry", padding=3)
         style.configure("TSpinbox", padding=3)
+        style.configure("TCombobox", padding=3)
 
     def _build_ui(self) -> None:
         root = ttk.Frame(self, padding=10)
@@ -219,11 +234,6 @@ class RotaryControlPanel(tk.Tk):
         #                 tilt up | screenshot
         # rotate left | tilt left | enter | tilt right | rotate right
         # back                  | tilt down | home
-        #
-        # This keeps the extra buttons close to the directional cluster:
-        # - screenshot: right of Up and above Right
-        # - back: below-left of Left
-        # - home: right of Down and below Right
         self._add_icon_button(control, "tilt_up", 0, 2)
         self._add_icon_button(control, "screenshot", 0, 3)
         self._add_icon_button(control, "rotate_left", 1, 0)
@@ -234,6 +244,33 @@ class RotaryControlPanel(tk.Tk):
         self._add_icon_button(control, "back", 2, 1)
         self._add_icon_button(control, "tilt_down", 2, 2)
         self._add_icon_button(control, "home", 2, 3)
+
+        custom = ttk.Frame(root, style="Panel.TFrame", padding=7)
+        custom.pack(fill="x", pady=(0, 8))
+
+        ttk.Label(custom, text="Command file", style="Panel.TLabel").grid(row=0, column=0, sticky="w", padx=(0, 5), pady=2)
+        ttk.Label(
+            custom,
+            textvariable=tk.StringVar(value=self.command_file_path.name),
+            style="Panel.TLabel",
+        ).grid(row=0, column=1, sticky="w", pady=2)
+
+        ttk.Button(custom, text="Reload", command=lambda: self._load_custom_commands(show_log=True)).grid(
+            row=0, column=2, sticky="ew", padx=(8, 4), pady=2
+        )
+        ttk.Button(custom, text="Run", command=self.run_selected_custom_command).grid(
+            row=0, column=3, sticky="ew", padx=(4, 0), pady=2
+        )
+
+        self.custom_command_combo = ttk.Combobox(
+            custom,
+            textvariable=self.custom_command_var,
+            values=[],
+            state="readonly",
+            width=52,
+        )
+        self.custom_command_combo.grid(row=1, column=0, columnspan=4, sticky="ew", pady=(3, 2))
+        custom.columnconfigure(1, weight=1)
 
         command_box = ttk.Frame(root, style="Panel.TFrame", padding=7)
         command_box.pack(fill="both", expand=True)
@@ -263,7 +300,7 @@ class RotaryControlPanel(tk.Tk):
         bottom_bar.pack(fill="x", pady=(5, 0))
         ttk.Label(
             bottom_bar,
-            text="Drag the bottom edge to resize height.",
+            text="Edit comands.txt, click Reload, choose a command, then Run.",
             style="Hint.TLabel",
         ).pack(side="left")
         ttk.Sizegrip(bottom_bar).pack(side="right", anchor="se")
@@ -353,6 +390,86 @@ class RotaryControlPanel(tk.Tk):
         if serial:
             base.extend(["-s", serial])
         return base
+
+    def _resolve_command_file_path(self) -> Path:
+        primary = APP_DIR / CUSTOM_COMMAND_PRIMARY_FILE
+        fallback = APP_DIR / CUSTOM_COMMAND_FALLBACK_FILE
+        if primary.exists():
+            return primary
+        if fallback.exists():
+            return fallback
+        return primary
+
+    def _ensure_command_file(self) -> None:
+        if self.command_file_path.exists():
+            return
+        self.command_file_path.write_text(SAMPLE_COMMANDS_TEXT, encoding="utf-8")
+
+    def _load_custom_commands(self, show_log: bool) -> None:
+        self.command_file_path = self._resolve_command_file_path()
+        try:
+            self._ensure_command_file()
+            lines = self.command_file_path.read_text(encoding="utf-8").splitlines()
+            commands = [line.strip() for line in lines if line.strip() and not line.lstrip().startswith("#")]
+            self.custom_commands = commands
+            self.custom_command_combo.configure(values=commands)
+            if commands:
+                current = self.custom_command_var.get().strip()
+                if current not in commands:
+                    self.custom_command_var.set(commands[0])
+            else:
+                self.custom_command_var.set("")
+            if show_log:
+                self._append_output(f"Loaded {len(commands)} custom command(s) from {self.command_file_path.name}.\n")
+        except OSError as error:
+            self.custom_commands = []
+            self.custom_command_combo.configure(values=[])
+            self.custom_command_var.set("")
+            if show_log:
+                self._append_output(f"Failed to read {self.command_file_path.name}: {error}\n")
+
+    @staticmethod
+    def _looks_like_adb_executable(token: str) -> bool:
+        normalized = token.strip('"').replace("\\", "/")
+        name = normalized.rsplit("/", 1)[-1].lower()
+        return name in {"adb", "adb.exe"}
+
+    def _build_custom_command(self, command_line: str) -> list[str]:
+        try:
+            tokens = shlex.split(command_line, comments=False, posix=True)
+        except ValueError as error:
+            raise ValueError(f"Invalid command syntax: {error}") from error
+
+        if not tokens:
+            raise ValueError("No command selected.")
+
+        if self._looks_like_adb_executable(tokens[0]):
+            adb = self.adb_path_var.get().strip() or tokens[0]
+            rest = tokens[1:]
+            if rest and rest[0] == "devices":
+                # 'adb devices' should list every device, so it should not be narrowed by -s SERIAL.
+                return [adb] + rest
+            base = [adb]
+            serial = self.serial_var.get().strip()
+            if serial:
+                base.extend(["-s", serial])
+            return base + rest
+
+        return tokens
+
+    def run_selected_custom_command(self) -> None:
+        command_line = self.custom_command_var.get().strip()
+        if not command_line:
+            self._append_output("No custom command selected. Edit comands.txt, then click Reload.\n")
+            return
+
+        try:
+            cmd = self._build_custom_command(command_line)
+        except ValueError as error:
+            self._append_output(str(error) + "\n")
+            return
+
+        self._run_command_async(cmd, f"Custom: {command_line}", repeat=1, delay_ms=0, timeout=45)
 
     def check_devices(self) -> None:
         cmd = [self.adb_path_var.get().strip() or "adb", "devices"]
@@ -448,13 +565,13 @@ class RotaryControlPanel(tk.Tk):
 
         self.after(0, lambda: self._append_output(message + "\n"))
 
-    def _run_command_async(self, cmd: list[str], label: str, repeat: int, delay_ms: int) -> None:
+    def _run_command_async(self, cmd: list[str], label: str, repeat: int, delay_ms: int, timeout: int = 12) -> None:
         self.last_command_var.set(" ".join(cmd))
         self._append_output(f"\n▶ {label}\n$ {' '.join(cmd)}\n")
-        thread = threading.Thread(target=self._run_command_worker, args=(cmd, repeat, delay_ms), daemon=True)
+        thread = threading.Thread(target=self._run_command_worker, args=(cmd, repeat, delay_ms, timeout), daemon=True)
         thread.start()
 
-    def _run_command_worker(self, cmd: list[str], repeat: int, delay_ms: int) -> None:
+    def _run_command_worker(self, cmd: list[str], repeat: int, delay_ms: int, timeout: int) -> None:
         outputs: list[str] = []
         for index in range(repeat):
             try:
@@ -462,7 +579,7 @@ class RotaryControlPanel(tk.Tk):
                     cmd,
                     capture_output=True,
                     text=True,
-                    timeout=12,
+                    timeout=timeout,
                     check=False,
                     **subprocess_no_window_options(),
                 )

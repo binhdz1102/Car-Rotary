@@ -1,0 +1,4 @@
+adb devices
+adb disconnect
+adb shell dumpsys window
+adb shell dumpsys meminfo
